@@ -2,7 +2,7 @@ use acp_thread::ContentBlock;
 use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCommentsBody};
 use editor::actions::OpenExcerpts;
 
-use crate::StartThreadIn;
+use crate::{FocusDown, FocusUp, StartThreadIn};
 use gpui::{Corner, List};
 use language_model::{LanguageModelEffortLevel, Speed};
 use settings::update_settings_file;
@@ -1484,6 +1484,78 @@ impl ThreadView {
             })
         };
         cx.notify();
+    }
+
+    fn is_editable_user_message(&self, entry_index: usize, cx: &App) -> bool {
+        if self.is_subagent() {
+            return false;
+        }
+
+        self.thread
+            .read(cx)
+            .entries()
+            .get(entry_index)
+            .and_then(|entry| entry.user_message())
+            .is_some_and(|message| message.id.is_some())
+    }
+
+    fn focus_message_editor_at(
+        &self,
+        entry_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(message_editor) = self
+            .entry_view_state
+            .read(cx)
+            .entry(entry_index)
+            .and_then(|entry| entry.message_editor())
+            .cloned()
+        else {
+            return false;
+        };
+
+        window.focus(&message_editor.focus_handle(cx), cx);
+        true
+    }
+
+    fn focus_previous_user_message(
+        &mut self,
+        _: &FocusUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let start_index = self
+            .editing_message
+            .unwrap_or_else(|| self.thread.read(cx).entries().len());
+
+        for entry_index in (0..start_index).rev() {
+            if self.is_editable_user_message(entry_index, cx)
+                && self.focus_message_editor_at(entry_index, window, cx)
+            {
+                return;
+            }
+        }
+    }
+
+    fn focus_next_user_message(
+        &mut self,
+        _: &FocusDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(start_index) = self.editing_message else {
+            return;
+        };
+
+        let end_index = self.thread.read(cx).entries().len();
+        for entry_index in start_index + 1..end_index {
+            if self.is_editable_user_message(entry_index, cx)
+                && self.focus_message_editor_at(entry_index, window, cx)
+            {
+                return;
+            }
+        }
     }
 
     // tool permissions
@@ -7681,6 +7753,8 @@ impl Render for ThreadView {
             .on_action(cx.listener(Self::handle_authorize_tool_call))
             .on_action(cx.listener(Self::open_permission_dropdown))
             .on_action(cx.listener(Self::open_add_context_menu))
+            .on_action(cx.listener(Self::focus_previous_user_message))
+            .on_action(cx.listener(Self::focus_next_user_message))
             .on_action(cx.listener(|this, _: &ToggleFastMode, _window, cx| {
                 this.toggle_fast_mode(cx);
             }))
