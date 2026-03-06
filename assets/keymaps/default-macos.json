@@ -370,6 +370,8 @@
       "cmd-shift-alt-enter": "agent::SendNextQueuedMessage",
       "cmd-shift-backspace": "agent::RemoveFirstQueuedMessage",
       "cmd-ctrl-e": "agent::EditFirstQueuedMessage",
+      "cmd-ctrl-[": "agent::FocusUp",
+      "cmd-ctrl-]": "agent::FocusDown",
       "cmd-alt-backspace": "agent::ClearMessageQueue",
       "cmd-shift-v": "agent::PasteRaw",
       "cmd-i": "agent::ToggleProfileSelector",

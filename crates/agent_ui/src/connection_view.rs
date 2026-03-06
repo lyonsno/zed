@@ -2760,6 +2760,7 @@ pub(crate) mod tests {
     use workspace::{Item, MultiWorkspace};
 
     use crate::agent_panel;
+    use crate::{FocusDown, FocusUp};
 
     use super::*;
 
@@ -4738,6 +4739,201 @@ pub(crate) mod tests {
 
             assert_eq!(new_editor.read(cx).text(cx), "Edited message content");
         })
+    }
+
+    #[gpui::test]
+    async fn test_focus_up_and_down_navigates_user_message_editors(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("Response 1".into()),
+        )]);
+
+        let (thread_view, cx) =
+            setup_thread_view(StubAgentServer::new(connection.clone()), cx).await;
+        add_to_workspace(thread_view.clone(), cx);
+
+        let message_editor = message_editor(&thread_view, cx);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Message 1", window, cx);
+        });
+        active_thread(&thread_view, cx).update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        connection.set_next_prompt_updates(vec![acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new("Response 2".into()),
+        )]);
+        message_editor.update_in(cx, |editor, window, cx| {
+            editor.set_text("Message 2", window, cx);
+        });
+        active_thread(&thread_view, cx).update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        message_editor.update_in(cx, |_editor, window, cx| {
+            window.dispatch_action(Box::new(FocusDown), cx);
+        });
+        cx.run_until_parked();
+        active_thread(&thread_view, cx).read_with(cx, |view, _cx| {
+            assert_eq!(view.editing_message, None);
+        });
+
+        message_editor.update_in(cx, |_editor, window, cx| {
+            window.dispatch_action(Box::new(FocusUp), cx);
+        });
+        cx.run_until_parked();
+
+        active_thread(&thread_view, cx).update_in(cx, |view, window, cx| {
+            assert_eq!(view.editing_message, Some(2));
+            let editor = view
+                .entry_view_state
+                .read(cx)
+                .entry(2)
+                .unwrap()
+                .message_editor()
+                .unwrap()
+                .clone();
+            assert!(editor.focus_handle(cx).is_focused(window));
+        });
+
+        active_thread(&thread_view, cx).update_in(cx, |_view, window, cx| {
+            window.dispatch_action(Box::new(FocusUp), cx);
+        });
+        cx.run_until_parked();
+
+        active_thread(&thread_view, cx).update_in(cx, |_view, window, cx| {
+            window.dispatch_action(Box::new(FocusUp), cx);
+        });
+        cx.run_until_parked();
+
+        active_thread(&thread_view, cx).update_in(cx, |view, window, cx| {
+            assert_eq!(view.editing_message, Some(0));
+            let editor = view
+                .entry_view_state
+                .read(cx)
+                .entry(0)
+                .unwrap()
+                .message_editor()
+                .unwrap()
+                .clone();
+            assert!(editor.focus_handle(cx).is_focused(window));
+        });
+
+        active_thread(&thread_view, cx).update_in(cx, |_view, window, cx| {
+            window.dispatch_action(Box::new(FocusDown), cx);
+        });
+        cx.run_until_parked();
+
+        active_thread(&thread_view, cx).update_in(cx, |_view, window, cx| {
+            window.dispatch_action(Box::new(FocusDown), cx);
+        });
+        cx.run_until_parked();
+
+        active_thread(&thread_view, cx).update_in(cx, |view, window, cx| {
+            assert_eq!(view.editing_message, Some(2));
+            let editor = view
+                .entry_view_state
+                .read(cx)
+                .entry(2)
+                .unwrap()
+                .message_editor()
+                .unwrap()
+                .clone();
+            assert!(editor.focus_handle(cx).is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_focus_navigation_is_noop_for_subagent_thread(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (connection_view, cx) = setup_thread_view(StubAgentServer::default_response(), cx).await;
+        add_to_workspace(connection_view.clone(), cx);
+
+        let (conversation, project, connection, parent_session_id) =
+            connection_view.read_with(cx, |view, cx| {
+                let active = view
+                    .active_thread()
+                    .expect("Expected an active parent thread")
+                    .read(cx);
+                (
+                    view.conversation.clone(),
+                    view.project.clone(),
+                    active.thread.read(cx).connection().clone(),
+                    active.id.clone(),
+                )
+            });
+
+        let subagent_thread = cx.update(|cx| {
+            create_test_acp_thread(
+                Some(parent_session_id.clone()),
+                "subagent-focus-nav",
+                connection,
+                project,
+                cx,
+            )
+        });
+
+        subagent_thread
+            .update(cx, |thread, cx| thread.send_raw("Subagent prompt", cx))
+            .await
+            .unwrap();
+        cx.run_until_parked();
+
+        subagent_thread.read_with(cx, |thread, _cx| {
+            let first_user_message = thread
+                .entries()
+                .first()
+                .and_then(|entry| entry.user_message())
+                .expect("Expected a user message in subagent thread");
+            assert!(
+                first_user_message.id.is_some(),
+                "Sanity check: this message would be editable in non-subagent threads"
+            );
+        });
+
+        let subagent_thread_view = connection_view.update_in(cx, |view, window, cx| {
+            conversation.update(cx, |conversation, cx| {
+                conversation.register_thread(subagent_thread.clone(), cx);
+            });
+            view.new_thread_view(
+                Some(parent_session_id),
+                subagent_thread,
+                conversation,
+                false,
+                None,
+                None,
+                window,
+                cx,
+            )
+        });
+
+        let message_editor =
+            subagent_thread_view.read_with(cx, |view, _cx| view.message_editor.clone());
+
+        message_editor.update_in(cx, |_editor, window, cx| {
+            window.dispatch_action(Box::new(FocusUp), cx);
+        });
+        cx.run_until_parked();
+
+        subagent_thread_view.read_with(cx, |view, _cx| {
+            assert_eq!(
+                view.editing_message, None,
+                "FocusUp should be a no-op for subagent threads"
+            );
+        });
+
+        message_editor.update_in(cx, |_editor, window, cx| {
+            window.dispatch_action(Box::new(FocusDown), cx);
+        });
+        cx.run_until_parked();
+
+        subagent_thread_view.read_with(cx, |view, _cx| {
+            assert_eq!(
+                view.editing_message, None,
+                "FocusDown should be a no-op for subagent threads"
+            );
+        });
     }
 
     #[gpui::test]
