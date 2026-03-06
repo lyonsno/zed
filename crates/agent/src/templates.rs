@@ -86,5 +86,26 @@ mod tests {
         let rendered = template.render(&templates).unwrap();
         assert!(rendered.contains("## Fixing Diagnostics"));
         assert!(rendered.contains("test-model"));
+        assert!(rendered.contains("## Code Block Formatting"));
+        assert!(rendered.contains("Prefer path-based fenced code blocks"));
+        assert!(!rendered.contains("bad_example_do_not_do_this"));
+        assert!(!rendered.contains("This is the ONLY valid way to format code blocks"));
+        assert!(!rendered.contains(
+            "if you ever find yourself writing three backticks followed by a language name, STOP!"
+        ));
+    }
+
+    #[test]
+    fn test_system_prompt_template_without_tools() {
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec![],
+            model_name: None,
+        };
+        let templates = Templates::new();
+        let rendered = template.render(&templates).unwrap();
+        assert!(!rendered.contains("## Tool Use"));
+        assert!(!rendered.contains("## Fixing Diagnostics"));
     }
 }
