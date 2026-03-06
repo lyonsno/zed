@@ -199,6 +199,12 @@ pub enum AcpThreadViewEvent {
 
 impl EventEmitter<AcpThreadViewEvent> for ThreadView {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProgrammaticFocusTarget {
+    MainMessageEditor,
+    EditedMessage(usize),
+}
+
 pub struct ThreadView {
     pub id: acp::SessionId,
     pub parent_id: Option<acp::SessionId>,
@@ -238,6 +244,7 @@ pub struct ThreadView {
     pub editor_expanded: bool,
     pub should_be_following: bool,
     pub editing_message: Option<usize>,
+    pending_focus_target: Option<ProgrammaticFocusTarget>,
     pub local_queued_messages: Vec<QueuedMessage>,
     pub queued_message_editors: Vec<Entity<MessageEditor>>,
     pub queued_message_editor_subscriptions: Vec<Subscription>,
@@ -458,6 +465,7 @@ impl ThreadView {
             editor_expanded: false,
             should_be_following: false,
             editing_message: None,
+            pending_focus_target: None,
             local_queued_messages: Vec::new(),
             queued_message_editors: Vec::new(),
             queued_message_editor_subscriptions: Vec::new(),
@@ -540,6 +548,14 @@ impl ThreadView {
             MessageEditorEvent::SendImmediately => self.interrupt_and_send(window, cx),
             MessageEditorEvent::Cancel => self.cancel_generation(cx),
             MessageEditorEvent::Focus => {
+                if let Some(ProgrammaticFocusTarget::EditedMessage(entry_index)) =
+                    self.pending_focus_target
+                {
+                    self.focus_message_editor_at(entry_index, window, cx);
+                    return;
+                }
+
+                self.pending_focus_target = None;
                 self.cancel_editing(&Default::default(), window, cx);
             }
             MessageEditorEvent::LostFocus => {}
@@ -598,6 +614,88 @@ impl ThreadView {
         self.parent_id.is_some()
     }
 
+    fn focused_editing_message(&self, window: &Window, cx: &App) -> Option<usize> {
+        let entry_index = self.editing_message?;
+        let message_editor = self
+            .entry_view_state
+            .read(cx)
+            .entry(entry_index)
+            .and_then(|entry| entry.message_editor())
+            .cloned()?;
+
+        message_editor
+            .focus_handle(cx)
+            .is_focused(window)
+            .then_some(entry_index)
+    }
+
+    fn normalize_stale_editing_message(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.editing_message.is_some()
+            && self
+                .message_editor
+                .focus_handle(cx)
+                .contains_focused(window, cx)
+        {
+            self.editing_message = None;
+            cx.notify();
+        }
+    }
+
+    fn key_context_focus_handle(&self, window: &Window, cx: &App) -> FocusHandle {
+        if self.parent_id.is_some() {
+            return self.focus_handle.clone();
+        }
+
+        if let Some(entry_index) = self.focused_editing_message(window, cx)
+            && let Some(message_editor) = self
+                .entry_view_state
+                .read(cx)
+                .entry(entry_index)
+                .and_then(|entry| entry.message_editor())
+                .cloned()
+        {
+            return message_editor.focus_handle(cx);
+        }
+
+        self.message_editor.focus_handle(cx)
+    }
+
+    fn set_pending_focus_target(
+        &mut self,
+        target: ProgrammaticFocusTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_focus_target = Some(target);
+
+        let thread_view = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = thread_view.update(cx, |this, cx| {
+                if this.pending_focus_target != Some(target) {
+                    return;
+                }
+
+                let target_is_focused = match target {
+                    ProgrammaticFocusTarget::MainMessageEditor => {
+                        this.message_editor
+                            .focus_handle(cx)
+                            .contains_focused(window, cx)
+                    }
+                    ProgrammaticFocusTarget::EditedMessage(entry_index) => this
+                        .entry_view_state
+                        .read(cx)
+                        .entry(entry_index)
+                        .and_then(|entry| entry.message_editor())
+                        .is_some_and(|editor| editor.focus_handle(cx).is_focused(window)),
+                };
+
+                if target_is_focused {
+                    this.pending_focus_target = None;
+                }
+            });
+        });
+    }
+
     /// Returns the currently active editor, either for a message that is being
     /// edited or the editor for a new message.
     pub(crate) fn active_editor(&self, cx: &App) -> Entity<MessageEditor> {
@@ -650,6 +748,22 @@ impl ThreadView {
                 self.expanded_tool_calls.remove(tool_call_id);
             }
             ViewEvent::MessageEditorEvent(_editor, MessageEditorEvent::Focus) => {
+                match self.pending_focus_target {
+                    Some(ProgrammaticFocusTarget::MainMessageEditor) => {
+                        self.focus_main_message_editor(window, cx);
+                        return;
+                    }
+                    Some(ProgrammaticFocusTarget::EditedMessage(expected_entry_index))
+                        if expected_entry_index != event.entry_index =>
+                    {
+                        self.focus_message_editor_at(expected_entry_index, window, cx);
+                        return;
+                    }
+                    Some(ProgrammaticFocusTarget::EditedMessage(_)) | None => {
+                        self.pending_focus_target = None;
+                    }
+                }
+
                 if let Some(AgentThreadEntry::UserMessage(user_message)) =
                     self.thread.read(cx).entries().get(event.entry_index)
                     && user_message.id.is_some()
@@ -659,6 +773,15 @@ impl ThreadView {
                 }
             }
             ViewEvent::MessageEditorEvent(editor, MessageEditorEvent::LostFocus) => {
+                if self.editing_message != Some(event.entry_index)
+                    || matches!(
+                        self.pending_focus_target,
+                        Some(ProgrammaticFocusTarget::EditedMessage(_))
+                    )
+                {
+                    return;
+                }
+
                 if let Some(AgentThreadEntry::UserMessage(user_message)) =
                     self.thread.read(cx).entries().get(event.entry_index)
                     && user_message.id.is_some()
@@ -1500,7 +1623,7 @@ impl ThreadView {
     }
 
     fn focus_message_editor_at(
-        &self,
+        &mut self,
         entry_index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1515,8 +1638,29 @@ impl ThreadView {
             return false;
         };
 
+        self.set_pending_focus_target(
+            ProgrammaticFocusTarget::EditedMessage(entry_index),
+            window,
+            cx,
+        );
+
+        if self.editing_message != Some(entry_index) {
+            self.editing_message = Some(entry_index);
+            cx.notify();
+        }
+
         window.focus(&message_editor.focus_handle(cx), cx);
         true
+    }
+
+    fn focus_main_message_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_pending_focus_target(ProgrammaticFocusTarget::MainMessageEditor, window, cx);
+
+        if self.editing_message.take().is_some() {
+            cx.notify();
+        }
+
+        window.focus(&self.message_editor.focus_handle(cx), cx);
     }
 
     fn focus_previous_user_message(
@@ -1525,8 +1669,10 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.normalize_stale_editing_message(window, cx);
+
         let start_index = self
-            .editing_message
+            .focused_editing_message(window, cx)
             .unwrap_or_else(|| self.thread.read(cx).entries().len());
 
         for entry_index in (0..start_index).rev() {
@@ -1544,7 +1690,9 @@ impl ThreadView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(start_index) = self.editing_message else {
+        self.normalize_stale_editing_message(window, cx);
+
+        let Some(start_index) = self.focused_editing_message(window, cx) else {
             return;
         };
 
@@ -1555,6 +1703,10 @@ impl ThreadView {
             {
                 return;
             }
+        }
+
+        if !self.is_subagent() {
+            self.focus_main_message_editor(window, cx);
         }
     }
 
@@ -7712,6 +7864,7 @@ impl ThreadView {
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_messages = self.list_state.item_count() > 0;
+        let thread_focus_handle = self.key_context_focus_handle(window, cx);
 
         let conversation = v_flex().flex_1().map(|this| {
             let this = this.when(self.resumed_without_history, |this| {
@@ -7729,7 +7882,7 @@ impl Render for ThreadView {
 
         v_flex()
             .key_context("AcpThread")
-            .track_focus(&self.focus_handle)
+            .track_focus(&thread_focus_handle)
             .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
                 if this.parent_id.is_none() {
                     this.cancel_generation(cx);
@@ -7753,8 +7906,8 @@ impl Render for ThreadView {
             .on_action(cx.listener(Self::handle_authorize_tool_call))
             .on_action(cx.listener(Self::open_permission_dropdown))
             .on_action(cx.listener(Self::open_add_context_menu))
-            .on_action(cx.listener(Self::focus_previous_user_message))
-            .on_action(cx.listener(Self::focus_next_user_message))
+            .capture_action(cx.listener(Self::focus_previous_user_message))
+            .capture_action(cx.listener(Self::focus_next_user_message))
             .on_action(cx.listener(|this, _: &ToggleFastMode, _window, cx| {
                 this.toggle_fast_mode(cx);
             }))
