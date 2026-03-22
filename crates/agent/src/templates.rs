@@ -84,10 +84,9 @@ mod tests {
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
-        assert!(rendered.contains("## Fixing Diagnostics"));
-        assert!(rendered.contains("test-model"));
-        assert!(rendered.contains("## Code Block Formatting"));
-        assert!(rendered.contains("Prefer path-based fenced code blocks"));
+        assert!(rendered.contains("## Tools"));
+        assert!(rendered.contains("## Code Changes"));
+        assert!(rendered.contains("## Output"));
         assert!(!rendered.contains("bad_example_do_not_do_this"));
         assert!(!rendered.contains("This is the ONLY valid way to format code blocks"));
         assert!(!rendered.contains(
@@ -105,7 +104,7 @@ mod tests {
         };
         let templates = Templates::new();
         let rendered = template.render(&templates).unwrap();
-        assert!(!rendered.contains("## Tool Use"));
-        assert!(!rendered.contains("## Fixing Diagnostics"));
+        assert!(!rendered.contains("## Tools"));
+        assert!(rendered.contains("## Constraints"));
     }
 }
