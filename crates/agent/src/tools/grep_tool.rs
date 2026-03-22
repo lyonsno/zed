@@ -25,7 +25,32 @@ use util::paths::PathMatcher;
 /// - Use this tool when you need to find files containing specific patterns
 /// - Results are paginated with 20 matches per page. Use the optional 'offset' parameter to request subsequent pages.
 /// - DO NOT use HTML entities solely to escape characters in the tool parameters.
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[schemars(rename_all = "snake_case")]
+pub enum GrepCase {
+    #[default]
+    Insensitive,
+    Sensitive,
+}
+
+impl GrepCase {
+    fn is_sensitive(self) -> bool {
+        matches!(self, Self::Sensitive)
+    }
+}
+
+impl From<bool> for GrepCase {
+    fn from(case_sensitive: bool) -> Self {
+        if case_sensitive {
+            Self::Sensitive
+        } else {
+            Self::Insensitive
+        }
+    }
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct GrepToolInput {
     /// A regex pattern to search for in the entire project. Note that the regex will be parsed by the Rust `regex` crate.
     ///
@@ -52,15 +77,52 @@ pub struct GrepToolInput {
     /// When not provided, starts from the beginning.
     #[serde(default)]
     pub offset: u32,
-    /// Whether the regex is case-sensitive. Defaults to false (case-insensitive).
+    /// Controls case matching for the regex.
+    ///
+    /// - Use `"insensitive"` to match regardless of case (default).
+    /// - Use `"sensitive"` to match exact case.
     #[serde(default)]
-    pub case_sensitive: bool,
+    pub case: GrepCase,
+}
+
+#[derive(Deserialize)]
+struct RawGrepToolInput {
+    regex: String,
+    include_pattern: Option<String>,
+    #[serde(default)]
+    offset: u32,
+    #[serde(default)]
+    case: Option<GrepCase>,
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for GrepToolInput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let input = RawGrepToolInput::deserialize(deserializer)?;
+        Ok(Self {
+            regex: input.regex,
+            include_pattern: input.include_pattern,
+            offset: input.offset,
+            case: input
+                .case
+                .or_else(|| input.case_sensitive.map(GrepCase::from))
+                .unwrap_or_default(),
+        })
+    }
 }
 
 impl GrepToolInput {
     /// Which page of search results this is.
     pub fn page(&self) -> u32 {
         1 + (self.offset / RESULTS_PER_PAGE)
+    }
+
+    fn is_case_sensitive(&self) -> bool {
+        self.case.is_sensitive()
     }
 }
 
@@ -95,7 +157,7 @@ impl AgentTool for GrepTool {
             Ok(input) => {
                 let page = input.page();
                 let regex_str = MarkdownInlineCode(&input.regex);
-                let case_info = if input.case_sensitive {
+                let case_info = if input.is_case_sensitive() {
                     " (case-sensitive)"
                 } else {
                     ""
@@ -156,7 +218,7 @@ impl AgentTool for GrepTool {
                 let query = SearchQuery::regex(
                     &input.regex,
                     false,
-                    input.case_sensitive,
+                    input.is_case_sensitive(),
                     false,
                     false,
                     include_matcher,
@@ -342,6 +404,34 @@ mod tests {
     use unindent::Unindent;
     use util::path;
 
+    #[test]
+    fn grep_tool_input_serializes_and_deserializes_case_modes() {
+        let new_input: GrepToolInput = serde_json::from_value(json!({
+            "regex": "uppercase",
+            "case": "sensitive",
+        }))
+        .unwrap();
+        assert_eq!(new_input.case, GrepCase::Sensitive);
+
+        let legacy_input: GrepToolInput = serde_json::from_value(json!({
+            "regex": "uppercase",
+            "case_sensitive": true,
+        }))
+        .unwrap();
+        assert_eq!(legacy_input.case, GrepCase::Sensitive);
+
+        let serialized = serde_json::to_value(&new_input).unwrap();
+        assert_eq!(
+            serialized,
+            json!({
+                "regex": "uppercase",
+                "include_pattern": null,
+                "offset": 0,
+                "case": "sensitive",
+            })
+        );
+    }
+
     #[gpui::test]
     async fn test_grep_tool_with_include_pattern(cx: &mut TestAppContext) {
         init_test(cx);
@@ -371,7 +461,7 @@ mod tests {
             regex: "println".to_string(),
             include_pattern: Some("root/**/*.rs".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -390,7 +480,7 @@ mod tests {
             regex: "fn".to_string(),
             include_pattern: Some("root/**/src/**".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -412,7 +502,7 @@ mod tests {
             regex: "fn".to_string(),
             include_pattern: None,
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -436,7 +526,7 @@ mod tests {
         fs.insert_tree(
             path!("/root"),
             serde_json::json!({
-                "case_test.txt": "This file has UPPERCASE and lowercase text.\nUPPERCASE patterns should match only with case_sensitive: true",
+                "case_test.txt": "This file has UPPERCASE and lowercase text.\nUPPERCASE patterns should match only with case: sensitive",
             }),
         )
         .await;
@@ -448,7 +538,7 @@ mod tests {
             regex: "uppercase".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -462,7 +552,7 @@ mod tests {
             regex: "uppercase".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
             offset: 0,
-            case_sensitive: true,
+            case: GrepCase::Sensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -476,7 +566,7 @@ mod tests {
             regex: "LOWERCASE".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
             offset: 0,
-            case_sensitive: true,
+            case: GrepCase::Sensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -491,7 +581,7 @@ mod tests {
             regex: "lowercase".to_string(),
             include_pattern: Some("**/*.txt".to_string()),
             offset: 0,
-            case_sensitive: true,
+            case: GrepCase::Sensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -592,7 +682,7 @@ mod tests {
             regex: "This is at the top level".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -621,7 +711,7 @@ mod tests {
             regex: "Function in nested module".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -652,7 +742,7 @@ mod tests {
             regex: "second_arg".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -687,7 +777,7 @@ mod tests {
             regex: "Inside if block".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -717,7 +807,7 @@ mod tests {
             regex: "Line 5".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -757,7 +847,7 @@ mod tests {
             regex: "Line 12".to_string(),
             include_pattern: Some("**/*.rs".to_string()),
             offset: 0,
-            case_sensitive: false,
+            case: GrepCase::Insensitive,
         };
 
         let result = run_grep_tool(input, project.clone(), cx).await;
@@ -870,7 +960,7 @@ mod tests {
                 regex: "outside_function".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -888,7 +978,7 @@ mod tests {
                 regex: "main".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -906,7 +996,7 @@ mod tests {
                 regex: "special_configuration".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -923,7 +1013,7 @@ mod tests {
                 regex: "custom_metadata".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -941,7 +1031,7 @@ mod tests {
                 regex: "SECRET_KEY".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -958,7 +1048,7 @@ mod tests {
                 regex: "private_key_content".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -976,7 +1066,7 @@ mod tests {
                 regex: "sensitive_data".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -994,7 +1084,7 @@ mod tests {
                 regex: "normal_file_content".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -1012,7 +1102,7 @@ mod tests {
                 regex: "outside_function".to_string(),
                 include_pattern: Some("../outside_project/**/*.rs".to_string()),
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -1105,7 +1195,7 @@ mod tests {
                 regex: "secret".to_string(),
                 include_pattern: None,
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,
@@ -1159,7 +1249,7 @@ mod tests {
                 regex: "secret".to_string(),
                 include_pattern: Some("worktree1/**/*.rs".to_string()),
                 offset: 0,
-                case_sensitive: false,
+                case: GrepCase::Insensitive,
             },
             project.clone(),
             cx,

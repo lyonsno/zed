@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    AgentTool, EditFileMode, EditFileTool, EditFileToolInput, GrepTool, GrepToolInput,
+    AgentTool, EditFileMode, EditFileTool, EditFileToolInput, GrepCase, GrepTool, GrepToolInput,
     ListDirectoryTool, ListDirectoryToolInput, ReadFileTool, ReadFileToolInput,
 };
 use Role::*;
@@ -438,7 +438,7 @@ fn eval_disable_cursor_blinking() {
                             regex: "blink".into(),
                             include_pattern: None,
                             offset: 0,
-                            case_sensitive: false,
+                            case: GrepCase::Insensitive,
                         },
                     )],
                 ),
@@ -548,7 +548,7 @@ fn eval_from_pixels_constructor() {
                             regex: "mod\\s+tests".into(),
                             include_pattern: Some("font-kit/src/canvas.rs".into()),
                             offset: 0,
-                            case_sensitive: false,
+                            case: GrepCase::Insensitive,
                         },
                     )],
                 ),
@@ -565,7 +565,7 @@ fn eval_from_pixels_constructor() {
                             regex: "mod\\s+tests".into(),
                             include_pattern: Some("font-kit/src/**/*.rs".into()),
                             offset: 0,
-                            case_sensitive: false,
+                            case: GrepCase::Insensitive,
                         },
                     )],
                 ),
@@ -582,7 +582,7 @@ fn eval_from_pixels_constructor() {
                             regex: "#\\[test\\]".into(),
                             include_pattern: Some("font-kit/src/**/*.rs".into()),
                             offset: 0,
-                            case_sensitive: false,
+                            case: GrepCase::Insensitive,
                         },
                     )],
                 ),
