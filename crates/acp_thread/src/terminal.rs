@@ -144,23 +144,7 @@ impl Terminal {
 
     fn truncated_output(&self, cx: &App) -> (String, usize) {
         let terminal = self.terminal.read(cx);
-        let mut content = terminal.get_content();
-
-        let original_content_len = content.len();
-
-        if let Some(limit) = self.output_byte_limit
-            && content.len() > limit
-        {
-            let mut end_ix = limit.min(content.len());
-            while !content.is_char_boundary(end_ix) {
-                end_ix -= 1;
-            }
-            // Don't truncate mid-line, clear the remainder of the last line
-            end_ix = content[..end_ix].rfind('\n').unwrap_or(end_ix);
-            content.truncate(end_ix);
-        }
-
-        (content, original_content_len)
+        truncate_terminal_output(terminal.get_content(), self.output_byte_limit)
     }
 
     pub fn command(&self) -> &Entity<Markdown> {
@@ -195,6 +179,24 @@ impl Terminal {
             self.terminal.read(cx).get_content()
         )
     }
+}
+
+fn truncate_terminal_output(mut content: String, limit: Option<usize>) -> (String, usize) {
+    let original_content_len = content.len();
+
+    if let Some(limit) = limit
+        && content.len() > limit
+    {
+        let mut end_ix = limit.min(content.len());
+        while !content.is_char_boundary(end_ix) {
+            end_ix -= 1;
+        }
+        // Don't truncate mid-line, clear the remainder of the last line.
+        end_ix = content[..end_ix].rfind('\n').unwrap_or(end_ix);
+        content.truncate(end_ix);
+    }
+
+    (content, original_content_len)
 }
 
 pub async fn create_terminal_entity(
@@ -252,4 +254,28 @@ pub async fn create_terminal_entity(
             )
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_terminal_output;
+
+    #[test]
+    fn truncate_terminal_output_keeps_complete_lines_within_limit() {
+        let line = "0123456789\n";
+        let content = line.repeat(8);
+        let (truncated, original_len) = truncate_terminal_output(content.clone(), Some(32));
+
+        assert_eq!(original_len, content.len());
+        assert_eq!(truncated, "0123456789\n0123456789");
+    }
+
+    #[test]
+    fn truncate_terminal_output_preserves_full_content_within_limit() {
+        let content = "first line\nsecond line\n".to_string();
+        let (truncated, original_len) = truncate_terminal_output(content.clone(), Some(1024));
+
+        assert_eq!(original_len, content.len());
+        assert_eq!(truncated, content);
+    }
 }

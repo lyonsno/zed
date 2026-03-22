@@ -19,7 +19,7 @@ use crate::{
     decide_permission_from_settings,
 };
 
-const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
+const COMMAND_OUTPUT_LIMIT: u64 = 32 * 1024;
 
 /// Executes a shell one-liner and returns the combined output.
 ///
